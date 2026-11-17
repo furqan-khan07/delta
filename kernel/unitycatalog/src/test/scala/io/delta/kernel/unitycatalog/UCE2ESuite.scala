@@ -46,7 +46,7 @@ class UCE2ESuite extends AnyFunSuite with UCCatalogManagedTestUtils {
       expCommitVersion: Long,
       expNumCatalogCommits: Long): Snapshot = {
     val txn = snapshot
-      .buildUpdateTableTransaction("engineInfo", Operation.MANUAL_UPDATE)
+      .buildUpdateTableTransaction("engineInfo", Operation.WRITE)
       .build(engine)
     val result = commitAppendData(engine, txn, seqOfUnpartitionedDataBatch1)
     val tableData = ucClient.getTableDataElseThrow(testUcTableId)
@@ -216,7 +216,7 @@ class UCE2ESuite extends AnyFunSuite with UCCatalogManagedTestUtils {
       // INSERT -- Empty commits with CRC generation
       for (_ <- 1 to 3) {
         val txn = currentSnapshot
-          .buildUpdateTableTransaction("engineInfo", Operation.MANUAL_UPDATE)
+          .buildUpdateTableTransaction("engineInfo", Operation.WRITE)
           .build(engine)
         val result = txn.commit(engine, CloseableIterable.emptyIterable())
         currentSnapshot = result.getPostCommitSnapshot.get()

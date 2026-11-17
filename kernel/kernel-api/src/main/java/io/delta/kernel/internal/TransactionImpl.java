@@ -35,6 +35,7 @@ import io.delta.kernel.hook.PostCommitHook;
 import io.delta.kernel.internal.actions.*;
 import io.delta.kernel.internal.annotation.VisibleForTesting;
 import io.delta.kernel.internal.checksum.CRCInfo;
+import io.delta.kernel.internal.checksum.ChecksumUtils;
 import io.delta.kernel.internal.clustering.ClusteringUtils;
 import io.delta.kernel.internal.compaction.LogCompactionWriter;
 import io.delta.kernel.internal.data.TransactionStateRow;
@@ -864,7 +865,13 @@ public class TransactionImpl implements Transaction {
 
   private Optional<CRCInfo> buildPostCommitCrcInfoIfCurrentCrcAvailable(
       long commitAtVersion, TransactionMetricsResult metricsResult) {
-    // TODO(#8026): Use the incremental operation allowlist for SIMPLE CRCs.
+    // The arithmetic below counts every AddFile as a new file. That only holds for operations the
+    // incremental CRC replay also supports; e.g. a "Manual Update" may re-add an existing file to
+    // update its metadata. For any other operation we return empty so that the checksum is written
+    // in FULL mode instead, which replays the log.
+    if (!ChecksumUtils.isIncrementalCrcSupportedOperation(operation.getDescription())) {
+      return Optional.empty();
+    }
     Optional<Long> numDeletedRecords =
         updatedDvMetric(CRCInfo::getNumDeletedRecords, metricsResult.getNumDeletedRecordsDelta());
     Optional<Long> numDeletionVectors =

@@ -20,14 +20,14 @@ import java.util.{Collections, Optional}
 
 import scala.jdk.CollectionConverters._
 
-import io.delta.kernel.{Snapshot, Table, Transaction, TransactionCommitResult}
+import io.delta.kernel.{Operation, Snapshot, Table, TableManager, Transaction, TransactionCommitResult}
 import io.delta.kernel.data.Row
 import io.delta.kernel.defaults.engine.{DefaultEngine, DefaultJsonHandler}
 import io.delta.kernel.defaults.engine.hadoopio.HadoopFileIO
 import io.delta.kernel.defaults.utils.WriteUtils
 import io.delta.kernel.engine.Engine
 import io.delta.kernel.hook.PostCommitHook.PostCommitHookType
-import io.delta.kernel.internal.{TableConfig, TableImpl}
+import io.delta.kernel.internal.{InternalScanFileUtils, TableConfig, TableImpl}
 import io.delta.kernel.internal.actions.{AddFile, DeletionVectorDescriptor, GenerateIcebergCompatActionUtils, SingleAction}
 import io.delta.kernel.internal.checksum.ChecksumReader
 import io.delta.kernel.internal.data.TransactionStateRow
@@ -548,6 +548,130 @@ class ChecksumSimpleStatsSuite extends ChecksumStatsSuiteBase with LogReplayBase
       assert(attempts === 2)
       checkCrcCorrect(engine, path, 2, 3, 300, None, Some(3L), Some(15L))
     }
+  }
+
+  /** Re-adds an existing file with updated tags only: same path and size, dataChange = false. */
+  private def metadataOnlyReAdd(file: AddFile): Row =
+    SingleAction.createAddFileSingleAction(AddFile.createAddFileRow(
+      testSchema,
+      file.getPath,
+      VectorUtils.stringStringMapValue(Collections.emptyMap[String, String]()),
+      file.getSize,
+      file.getModificationTime,
+      false, // dataChange
+      Optional.empty(),
+      Optional.of(VectorUtils.stringStringMapValue(Map("reAdded" -> "true").asJava)),
+      Optional.empty(),
+      Optional.empty(),
+      Optional.of(new DataFileStatistics(
+        100L,
+        Collections.emptyMap(),
+        Collections.emptyMap(),
+        Collections.emptyMap(),
+        Optional.of(false)))))
+
+  private def updateTxn(engine: Engine, path: String, operation: Operation): Transaction =
+    TableManager.loadSnapshot(path).build(engine)
+      .buildUpdateTableTransaction("test-engine", operation).build(engine)
+
+  private def checksumHookTypes(result: TransactionCommitResult): Seq[PostCommitHookType] =
+    result.getPostCommitHooks.asScala.map(_.getType).filter(hookType =>
+      hookType == PostCommitHookType.CHECKSUM_SIMPLE ||
+        hookType == PostCommitHookType.CHECKSUM_FULL).toSeq
+
+  /** Asserts the persisted CRC at the latest version matches the reconciled (scanned) state. */
+  private def checkCrcMatchesReconciledState(
+      engine: Engine,
+      path: String,
+      expectedFileCount: Long,
+      expectedTableSize: Long): Unit = {
+    val snapshot = TableManager.loadSnapshot(path).build(engine)
+    val activeFileSizes = collectScanFileRows(snapshot.getScanBuilder.build(), engine)
+      .map(InternalScanFileUtils.getAddFileStatus(_).getSize)
+    assert(activeFileSizes.size === expectedFileCount)
+    assert(activeFileSizes.sum === expectedTableSize)
+    checkCrcCorrect(
+      engine,
+      path,
+      snapshot.getVersion,
+      activeFileSizes.size,
+      activeFileSizes.sum,
+      Some(histogramForSize100Files(activeFileSizes.size)))
+  }
+
+  test("Metadata-only re-add under MANUAL_UPDATE: checksum hook does not overcount files") {
+    withTempDirAndEngine { (path, engine) =>
+      val file = addFile("a.parquet")
+      commitSimple(getCreateTxn(engine, path, testSchema), engine, addFileToRow(file))
+      checkCrcCorrect(engine, path, 0, 1, 100, Some(histogramForSize100Files(1)))
+
+      val result = updateTxn(engine, path, Operation.MANUAL_UPDATE)
+        .commit(engine, actions(metadataOnlyReAdd(file)))
+      assert(result.getVersion === 1)
+      val checksumHooks = result.getPostCommitHooks.asScala.filter(hook =>
+        checksumHookTypes(result).contains(hook.getType))
+      assert(checksumHooks.size === 1)
+      checksumHooks.head.threadSafeInvoke(engine)
+
+      checkCrcMatchesReconciledState(engine, path, expectedFileCount = 1, expectedTableSize = 100)
+      assert(checksumHookTypes(result) === Seq(PostCommitHookType.CHECKSUM_FULL))
+    }
+  }
+
+  test("Metadata-only re-add under MANUAL_UPDATE: " +
+    "post-commit snapshot checksum does not overcount files") {
+    withTempDirAndEngine { (path, engine) =>
+      val file = addFile("a.parquet")
+      commitSimple(getCreateTxn(engine, path, testSchema), engine, addFileToRow(file))
+
+      val result = updateTxn(engine, path, Operation.MANUAL_UPDATE)
+        .commit(engine, actions(metadataOnlyReAdd(file)))
+      val postCommitSnapshot = result.getPostCommitSnapshot.get()
+      val writeMode = postCommitSnapshot.getStatistics.getChecksumWriteMode.get()
+      postCommitSnapshot.writeChecksum(engine, writeMode)
+
+      checkCrcMatchesReconciledState(engine, path, expectedFileCount = 1, expectedTableSize = 100)
+      assert(writeMode === Snapshot.ChecksumWriteMode.FULL)
+      intercept[IllegalStateException] {
+        result.getPostCommitSnapshot.get()
+          .writeChecksum(engine, Snapshot.ChecksumWriteMode.SIMPLE)
+      }
+    }
+  }
+
+  Seq(
+    Operation.WRITE -> PostCommitHookType.CHECKSUM_SIMPLE,
+    Operation.STREAMING_UPDATE -> PostCommitHookType.CHECKSUM_FULL,
+    Operation.MANUAL_UPDATE -> PostCommitHookType.CHECKSUM_FULL).foreach {
+    case (operation, expectedHookType) =>
+      test(s"Append under $operation selects $expectedHookType and writes a correct CRC") {
+        withTempDirAndEngine { (path, engine) =>
+          commitSimple(
+            getCreateTxn(engine, path, testSchema),
+            engine,
+            addFileToRow(addFile("a.parquet")))
+
+          val result = updateTxn(engine, path, operation)
+            .commit(engine, actions(addFileToRow(addFile("b.parquet"))))
+          assert(checksumHookTypes(result) === Seq(expectedHookType))
+          val expectedWriteMode =
+            if (expectedHookType == PostCommitHookType.CHECKSUM_SIMPLE) {
+              Snapshot.ChecksumWriteMode.SIMPLE
+            } else {
+              Snapshot.ChecksumWriteMode.FULL
+            }
+          assert(result.getPostCommitSnapshot.get().getStatistics.getChecksumWriteMode.get() ===
+            expectedWriteMode)
+          result.getPostCommitHooks.asScala
+            .filter(_.getType == expectedHookType).foreach(_.threadSafeInvoke(engine))
+
+          checkCrcMatchesReconciledState(
+            engine,
+            path,
+            expectedFileCount = 2,
+            expectedTableSize = 200)
+        }
+      }
   }
 
   test("FULL CRC writing mode can incrementally replay from a CRC with expected fields") {

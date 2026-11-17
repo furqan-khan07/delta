@@ -148,6 +148,17 @@ public class ChecksumUtils {
       Collections.singleton("Deletion Vector Tombstones");
 
   /**
+   * Returns whether a commit written with the given operation can be folded into a CRC from its
+   * file actions alone, i.e. without a full log replay. Both incremental CRC replay and the
+   * post-commit SIMPLE CRC rely on this check.
+   *
+   * @param operation the operation name recorded in the commit's commitInfo
+   */
+  public static boolean isIncrementalCrcSupportedOperation(String operation) {
+    return INCREMENTAL_SUPPORTED_OPS.contains(operation);
+  }
+
+  /**
    * Computes the state of a Delta table and writes a checksum file for the provided snapshot's
    * version. If a checksum file already exists for this version, this method returns without any
    * changes.
@@ -530,7 +541,7 @@ public class ChecksumUtils {
             if (commitInfo == null
                 || !commitInfo
                     .getOperation()
-                    .filter(INCREMENTAL_SUPPORTED_OPS::contains)
+                    .filter(ChecksumUtils::isIncrementalCrcSupportedOperation)
                     .isPresent()) {
               logger.info(
                   "Falling back to full replay after {}ms: "
