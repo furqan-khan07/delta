@@ -275,12 +275,9 @@ trait DeltaVacuumSuiteBase extends QueryTest
         } else {
           deltaTable.vacuum()
         }
-        if(expectedDf == Seq()) {
-          assert(result === spark.emptyDataFrame)
-        } else {
-          val qualified = expectedDf.map(p => fs.makeQualified(new Path(p)).toString)
-          checkDatasetUnorderly(result.as[String], qualified: _*)
-        }
+        assert(result.schema === new StructType().add("path", StringType))
+        val qualified = expectedDf.map(p => fs.makeQualified(new Path(p)).toString)
+        checkDatasetUnorderly(result.as[String], qualified: _*)
       case AdvanceClock(timeToAdd: Long) =>
         Given(s"*** Advancing clock by $timeToAdd millis")
         clock.advance(timeToAdd)
@@ -337,8 +334,9 @@ trait DeltaVacuumSuiteBase extends QueryTest
       CreateFile(notCommittedFile, commitToActionLog = false),
       CheckFiles(Seq(committedFile, notCommittedFile)),
 
-      // Actual run should delete the not committed file and but not delete files
-      ExecuteVacuumInScala(deltaTable, Seq()),
+      // Actual run should delete the not committed file and but not delete files. Like the SQL
+      // command, it returns the path of the table.
+      ExecuteVacuumInScala(deltaTable, Seq(table.path.toString)),
       CheckFiles(Seq(committedFile)),
       // File ts older than default retention
       // However, non committed files are not deleted by lite vacuum.
@@ -349,7 +347,7 @@ trait DeltaVacuumSuiteBase extends QueryTest
       CheckFiles(Seq(committedFile)),
 
       // Vacuum with 0 retention should actually delete the file.
-      ExecuteVacuumInScala(deltaTable, Seq(), Some(0)),
+      ExecuteVacuumInScala(deltaTable, Seq(table.path.toString), Some(0)),
       CheckFiles(Seq(committedFile), exist = false))
   }
 
@@ -576,6 +574,20 @@ class DeltaVacuumSuite extends DeltaVacuumSuiteBase with DeltaSQLCommandTest
           new File(spark.sessionState.catalog.getTableMetadata(TableIdentifier(tableName)).location)
         vacuumScalaTest(deltaTable, tablePath)
       }
+    }
+  }
+
+  test("Scala API returns the same result as the SQL command") {
+    withEnvironment { (tempDir, _) =>
+      val path = tempDir.getAbsolutePath
+      spark.range(10).write.format("delta").save(path)
+      val deltaTable = io.delta.tables.DeltaTable.forPath(path)
+
+      val sqlResult = spark.sql(s"VACUUM delta.`$path`")
+      val scalaResult = deltaTable.vacuum()
+      assert(scalaResult.schema === sqlResult.schema)
+      checkAnswer(scalaResult, sqlResult.collect())
+      checkAnswer(deltaTable.vacuum(200), sqlResult.collect())
     }
   }
 

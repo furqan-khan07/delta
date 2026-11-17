@@ -592,13 +592,19 @@ class DeltaTableTestsMixin:
         self.__createFile('abc.txt', 'abcde')
         self.__createFile('bac.txt', 'abcdf')
         self.assertEqual(True, self.__checkFileExists('abc.txt'))
-        dt.vacuum()  # will not delete files as default retention is used.
+        result = dt.vacuum()  # will not delete files as default retention is used.
+        # Like the VACUUM SQL command, vacuum returns the path of the table.
+        self.assertEqual(result.columns, ["path"])
+        rows = result.collect()
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0].path.endswith(os.path.basename(self.tempFile)))
+        self.assertEqual(rows, self.spark.sql("VACUUM '%s'" % self.tempFile).collect())
         dt.vacuum(1000)  # test whether integers work
 
         self.assertEqual(True, self.__checkFileExists('bac.txt'))
         retentionConf = "spark.databricks.delta.retentionDurationCheck.enabled"
         self.spark.conf.set(retentionConf, "false")
-        dt.vacuum(0.0)
+        self.assertEqual(dt.vacuum(0.0).collect(), rows)
         self.spark.conf.set(retentionConf, "true")
         self.assertEqual(False, self.__checkFileExists('bac.txt'))
         self.assertEqual(False, self.__checkFileExists('abc.txt'))

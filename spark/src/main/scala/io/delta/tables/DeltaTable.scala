@@ -90,8 +90,9 @@ class DeltaTable private[tables](
 
   /**
    * Recursively delete files and directories in the table that are not needed by the table for
-   * maintaining older versions up to the given retention threshold. This method will return an
-   * empty DataFrame on successful completion.
+   * maintaining older versions up to the given retention threshold. Like the `VACUUM` SQL
+   * command, this method will return a DataFrame with a single `path` column that contains the
+   * path of the table on successful completion.
    *
    * @param retentionHours The retention threshold in hours. Files required by the table for
    *                       reading versions earlier than this will be preserved and the
@@ -104,8 +105,9 @@ class DeltaTable private[tables](
 
   /**
    * Recursively delete files and directories in the table that are not needed by the table for
-   * maintaining older versions up to the given retention threshold. This method will return an
-   * empty DataFrame on successful completion.
+   * maintaining older versions up to the given retention threshold. Like the `VACUUM` SQL
+   * command, this method will return a DataFrame with a single `path` column that contains the
+   * path of the table on successful completion.
    *
    * note: This will use the default retention period of 7 days.
    *

@@ -228,8 +228,9 @@ class DeltaTable(object):
     def vacuum(self, retentionHours: Optional[float] = None) -> DataFrame:
         """
         Recursively delete files and directories in the table that are not needed by the table for
-        maintaining older versions up to the given retention threshold. This method will return an
-        empty DataFrame on successful completion.
+        maintaining older versions up to the given retention threshold. Like the ``VACUUM`` SQL
+        command, this method will return a DataFrame with a single ``path`` column that contains
+        the path of the table on successful completion.
 
         Example::
 
